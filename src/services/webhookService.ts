@@ -126,17 +126,14 @@ export const webhookService = {
       // Enviar webhooks em paralelo
       const results = await Promise.allSettled(webhooks.map(async webhook => {
         try {
-          // Usar sempre a URL principal do webhook
           const url = webhook.url;
           
-          // Adicionar headers necessários
           const headers = {
             'Content-Type': 'application/json',
             'Accept': 'application/json',
             ...(webhook.headers || {})
           };
 
-          // Fazer a requisição POST
           const response = await axiosInstance({
             method: 'POST',
             url,
@@ -149,33 +146,45 @@ export const webhookService = {
 
           console.log(`Webhook enviado com sucesso para ${url}`, response.data);
 
-          // Extrair dados da resposta
+          // Extrair dados da resposta priorizando ClickUp
           const webhookResponse: WebhookResponse = {};
-          
-          // Extrair taskId
-          if (response.data?.id) {
-            webhookResponse.taskId = response.data.id;
-          } else if (response.data?.taskId) {
-            webhookResponse.taskId = response.data.taskId;
-          } else if (response.data?.task?.id) {
-            webhookResponse.taskId = response.data.task.id;
-          }
 
-          // Extrair gmailId
-          if (response.data?.gmailId) {
-            webhookResponse.gmailId = response.data.gmailId;
-          } else if (response.data?.gmail?.id) {
-            webhookResponse.gmailId = response.data.gmail.id;
-          } else if (response.data?.messageId) {
-            webhookResponse.gmailId = response.data.messageId;
-          }
+          // Verificar se é uma resposta do ClickUp
+          const isClickUpResponse = response.data?.history_items || 
+                                  response.data?.task || 
+                                  response.data?.list || 
+                                  response.data?.space;
 
-          // Extrair status e prioridade
-          if (response.data?.status) {
-            webhookResponse.status = response.data.status;
-          }
-          if (response.data?.priority) {
-            webhookResponse.priority = response.data.priority;
+          if (isClickUpResponse) {
+            // Extrair ID do ClickUp de diferentes locais possíveis na resposta
+            webhookResponse.taskId = 
+              response.data?.task?.id ||
+              response.data?.id ||
+              response.data?.task_id ||
+              response.data?.history_items?.[0]?.task?.id ||
+              response.data?.history_items?.[0]?.after?.id;
+
+            // Extrair status e prioridade do ClickUp
+            if (response.data?.status || response.data?.task?.status) {
+              webhookResponse.status = response.data.status || response.data.task.status;
+            }
+            if (response.data?.priority || response.data?.task?.priority) {
+              webhookResponse.priority = response.data.priority || response.data.task.priority;
+            }
+          } else {
+            // Se não for resposta do ClickUp, usar outros IDs disponíveis
+            if (response.data?.id) {
+              webhookResponse.taskId = response.data.id;
+            }
+            if (!webhookResponse.taskId && response.data?.gmailId) {
+              webhookResponse.gmailId = response.data.gmailId;
+            }
+            if (response.data?.status) {
+              webhookResponse.status = response.data.status;
+            }
+            if (response.data?.priority) {
+              webhookResponse.priority = response.data.priority;
+            }
           }
 
           return { success: true, url, response: webhookResponse };
@@ -225,16 +234,36 @@ export const webhookService = {
       );
 
       if (successfulResults.length > 0) {
-        // Combinar todas as respostas em uma única
+        // Combinar todas as respostas em uma única, priorizando ClickUp
         const combinedResponse: WebhookResponse = {};
         
-        successfulResults.forEach(result => {
-          const response = result.value.response;
-          if (response.taskId) combinedResponse.taskId = response.taskId;
-          if (response.gmailId) combinedResponse.gmailId = response.gmailId;
-          if (response.status) combinedResponse.status = response.status;
-          if (response.priority) combinedResponse.priority = response.priority;
-        });
+        // Primeiro procurar por respostas do ClickUp
+        const clickupResponse = successfulResults.find(result => 
+          result.value.response.taskId && 
+          result.value.response.taskId.startsWith('task_')
+        );
+
+        if (clickupResponse) {
+          // Se encontrou resposta do ClickUp, usar ela
+          Object.assign(combinedResponse, clickupResponse.value.response);
+        } else {
+          // Se não encontrou ClickUp, usar outras respostas
+          successfulResults.forEach(result => {
+            const response = result.value.response;
+            if (response.taskId && !combinedResponse.taskId) {
+              combinedResponse.taskId = response.taskId;
+            }
+            if (response.gmailId && !combinedResponse.taskId && !combinedResponse.gmailId) {
+              combinedResponse.gmailId = response.gmailId;
+            }
+            if (response.status && !combinedResponse.status) {
+              combinedResponse.status = response.status;
+            }
+            if (response.priority && !combinedResponse.priority) {
+              combinedResponse.priority = response.priority;
+            }
+          });
+        }
 
         console.log('Resposta combinada dos webhooks:', combinedResponse);
         return combinedResponse;
