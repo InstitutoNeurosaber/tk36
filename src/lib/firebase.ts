@@ -43,7 +43,6 @@ const db = initializeFirestore(app, {
     tabManager: persistentMultipleTabManager(),
     sizeBytes: 100 * 1024 * 1024 // 100MB de cache
   }),
-  experimentalForceLongPolling: true, // Usar apenas uma opção de polling
   ignoreUndefinedProperties: true
 });
 
@@ -55,17 +54,26 @@ const functions = getFunctions(app);
 // Configurar persistência de autenticação
 setPersistence(auth, browserLocalPersistence).catch(console.error);
 
-// Configurar emuladores em desenvolvimento
-/* if (import.meta.env.DEV) {
-  connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true });
-  connectFirestoreEmulator(db, '127.0.0.1', 8080);
-  connectStorageEmulator(storage, '127.0.0.1', 9199);
-  connectFunctionsEmulator(functions, '127.0.0.1', 5001);
-} */
+// Configurar emuladores APENAS em desenvolvimento local
+const isLocalDev = window.location.hostname === 'localhost' || 
+                   window.location.hostname === '127.0.0.1' ||
+                   window.location.hostname.includes('stackblitz');
+
+if (isLocalDev && import.meta.env.DEV) {
+  try {
+    console.log('Conectando aos emuladores Firebase...');
+    connectAuthEmulator(auth, 'http://localhost:9099', { disableWarnings: true });
+    connectFirestoreEmulator(db, 'localhost', 8080);
+    connectStorageEmulator(storage, 'localhost', 9199);
+    connectFunctionsEmulator(functions, 'localhost', 5001);
+    console.log('Emuladores Firebase conectados com sucesso');
+  } catch (error) {
+    console.warn('Erro ao conectar aos emuladores:', error);
+  }
+}
 
 // Estado da conexão
 let isOnline = navigator.onLine;
-let persistenceEnabled = false;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_DELAY = 5000;
@@ -73,36 +81,22 @@ const OFFLINE_CACHE_KEY = 'firestore_offline_cache';
 
 // Habilitar persistência offline com retry
 const enablePersistence = async (retryCount = 0) => {
-  if (persistenceEnabled) return;
+  if (retryCount >= 3) return;
 
   try {
     await enableIndexedDbPersistence(db, {
       synchronizeTabs: true,
       forceOwnership: false
     });
-    persistenceEnabled = true;
     console.log('Persistência offline habilitada com sucesso');
   } catch (err: any) {
     if (err.code === 'failed-precondition') {
       console.warn('Múltiplas abas abertas, persistência disponível em apenas uma');
-      persistenceEnabled = true; // Consideramos ok neste caso
     } else if (err.code === 'unimplemented') {
       console.warn('Navegador não suporta persistência offline');
-      persistenceEnabled = true; // Nada podemos fazer
-    } else if (retryCount < 3) {
+    } else {
       console.warn(`Tentativa ${retryCount + 1} de habilitar persistência falhou, tentando novamente em 2s...`);
       setTimeout(() => enablePersistence(retryCount + 1), 2000);
-    } else {
-      console.error('Erro ao configurar persistência após várias tentativas:', err);
-      // Tentar usar localforage como fallback
-      try {
-        await localforage.setItem(OFFLINE_CACHE_KEY, {
-          enabled: true,
-          timestamp: Date.now()
-        });
-      } catch (fallbackError) {
-        console.error('Erro ao configurar cache fallback:', fallbackError);
-      }
     }
   }
 };
@@ -110,29 +104,26 @@ const enablePersistence = async (retryCount = 0) => {
 // Iniciar persistência
 enablePersistence();
 
-// Função para reconectar ao Firestore com retry
+// Função para reconectar ao Firestore
 export const reconnectFirestore = async (attempt = 0): Promise<boolean> => {
-  if (isOnline && attempt < MAX_RECONNECT_ATTEMPTS) {
-    try {
-      await enableNetwork(db);
-      await waitForPendingWrites(db);
-      console.log('Reconectado ao Firestore com sucesso');
-      reconnectAttempts = 0;
-      return true;
-    } catch (error) {
-      console.warn(`Tentativa ${attempt + 1} de reconexão falhou:`, error);
-      
-      // Tentar novamente após delay
-      if (attempt < MAX_RECONNECT_ATTEMPTS - 1) {
-        await new Promise(resolve => setTimeout(resolve, RECONNECT_DELAY));
-        return reconnectFirestore(attempt + 1);
-      }
-      
-      console.error('Máximo de tentativas de reconexão atingido');
-      return false;
-    }
+  if (attempt >= MAX_RECONNECT_ATTEMPTS) {
+    console.error('Máximo de tentativas de reconexão atingido');
+    return false;
   }
-  return false;
+
+  try {
+    await enableNetwork(db);
+    await waitForPendingWrites(db);
+    console.log('Reconectado ao Firestore com sucesso');
+    reconnectAttempts = 0;
+    return true;
+  } catch (error) {
+    console.warn(`Tentativa ${attempt + 1} de reconexão falhou:`, error);
+    
+    // Tentar novamente após delay
+    await new Promise(resolve => setTimeout(resolve, RECONNECT_DELAY));
+    return reconnectFirestore(attempt + 1);
+  }
 };
 
 // Função para desconectar do Firestore
